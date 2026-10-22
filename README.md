@@ -2,19 +2,27 @@
 
 Free, fully offline AI-style photo enhancer for any Android phone.
 
-## Features
+## Photo tools
 
-- **Magic one-tap enhance** — automatic all-round improvement
+- **Magic** — one-tap automatic enhancement
 - **Brighten** — lift shadows and exposure
 - **HDR** — balance highlights and shadows
 - **Sharpen** — crisp detail recovery
 - **Deblur** — fix soft and blurry shots
 - **Fix Moire** — remove screen-capture moire patterns
-- **Intensity slider** — dial the effect from subtle to strong
-- **Hold-to-compare** — press and hold to see before/after
-- **Save & share** — export to Gallery or share directly
+- **Remove Shadow** — lift unwanted shadows
+- **Reduce Glare** — cut reflections and glare
+- **Fix Lens** — correct lens distortion
+- **Portrait** — background blur for portraits
+- **Jawline** — subtle facial structure refinement
+- **AI Upscale 2x/4x** — Real-ESRGAN super-resolution, fully on-device
 
-Everything runs on-device with OpenCV. No internet permission, no accounts, no ads.
+## Video tools
+
+- **Long Exposure** — turn a short clip into a long-exposure style photo
+- **Single Take** — capture the best frame from a burst of video
+
+Everything runs on-device with OpenCV + on-device AI models. No internet permission, no accounts, no ads.
 
 ## Download
 

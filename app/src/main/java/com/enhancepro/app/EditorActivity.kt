@@ -11,7 +11,6 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -21,6 +20,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
 import org.opencv.core.Mat
+import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -30,6 +30,21 @@ import java.util.Locale
 class EditorActivity : ComponentActivity() {
 
     companion object { const val EXTRA_URI = "uri" }
+
+    sealed class ToolId(val label: String) {
+        class Cv(val t: Filters.Tool) : ToolId(t.label)
+        object Portrait : ToolId("Portrait")
+        object Jawline : ToolId("Jawline")
+        object Upscale2 : ToolId("Upscale 2x")
+        object Upscale4 : ToolId("Upscale 4x")
+    }
+
+    private val tools = listOf(
+        ToolId.Cv(Filters.Tool.MAGIC), ToolId.Cv(Filters.Tool.BRIGHTEN), ToolId.Cv(Filters.Tool.HDR),
+        ToolId.Cv(Filters.Tool.SHARPEN), ToolId.Cv(Filters.Tool.DEBLUR), ToolId.Cv(Filters.Tool.MOIRE),
+        ToolId.Cv(Filters.Tool.SHADOW), ToolId.Cv(Filters.Tool.GLARE), ToolId.Cv(Filters.Tool.LENS),
+        ToolId.Portrait, ToolId.Jawline, ToolId.Upscale2, ToolId.Upscale4
+    )
 
     private val bg = Color.parseColor("#0D0D0F")
     private val gold = Color.parseColor("#E8A33D")
@@ -42,9 +57,10 @@ class EditorActivity : ComponentActivity() {
     private var original: Bitmap? = null
     private var srcMat: Mat? = null
     private var current: Bitmap? = null
-    private var currentTool: Filters.Tool = Filters.Tool.MAGIC
+    private var currentTool: ToolId = ToolId.Cv(Filters.Tool.MAGIC)
     private var processing = false
-    private val chipViews = mutableMapOf<Filters.Tool, TextView>()
+    private var esrgan: Esrgan? = null
+    private val chipViews = mutableMapOf<Int, TextView>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,9 +95,21 @@ class EditorActivity : ComponentActivity() {
 
         val chipRow = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val chipLin = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(24, 10, 24, 10) }
-        for (tool in Filters.Tool.values()) {
-            val chip = makeChip(tool)
-            chipViews[tool] = chip
+        tools.forEachIndexed { idx, tool ->
+            val chip = TextView(this).apply {
+                text = tool.label
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setPadding(36, 0, 36, 0)
+                setChipStyle(this, idx == 0)
+                setOnClickListener {
+                    currentTool = tool
+                    chipViews.forEach { (i, v) -> setChipStyle(v, i == idx) }
+                    slider.progress = if (tool is ToolId.Cv && tool.t == Filters.Tool.LENS) 50 else 100
+                    runTool()
+                }
+            }
+            chipViews[idx] = chip
             val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, 96)
             lp.marginEnd = 18
             chip.layoutParams = lp
@@ -122,19 +150,7 @@ class EditorActivity : ComponentActivity() {
         root.addView(btnRow)
         setContentView(root)
 
-        selectChip(Filters.Tool.MAGIC)
         loadImage(intent.getStringExtra(EXTRA_URI))
-    }
-
-    private fun makeChip(tool: Filters.Tool): TextView {
-        return TextView(this).apply {
-            text = tool.label
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setPadding(36, 0, 36, 0)
-            setChipStyle(this, false)
-            setOnClickListener { selectChip(tool); runTool() }
-        }
     }
 
     private fun setChipStyle(v: TextView, selected: Boolean) {
@@ -143,11 +159,6 @@ class EditorActivity : ComponentActivity() {
         if (selected) { d.setColor(gold); v.setTextColor(Color.parseColor("#0D0D0F")) }
         else { d.setColor(chipBg); v.setTextColor(chipText) }
         v.background = d
-    }
-
-    private fun selectChip(tool: Filters.Tool) {
-        currentTool = tool
-        chipViews.forEach { (t, v) -> setChipStyle(v, t == tool) }
     }
 
     private fun makeButton(label: String, color: Int, textColor: Int): TextView {
@@ -202,35 +213,73 @@ class EditorActivity : ComponentActivity() {
         statusText.text = "${tool.label}..."
         Thread {
             val t0 = System.currentTimeMillis()
-            val out = Filters.apply(src, tool, intensity)
-            val bmp = Filters.matToBitmap(out)
-            out.release()
-            val ms = System.currentTimeMillis() - t0
-            runOnUiThread {
-                processing = false
-                current = bmp
-                imageView.setImageBitmap(bmp)
-                statusText.text = "${tool.label} - ${ms / 1000.0}s - hold photo to compare"
+            try {
+                when (tool) {
+                    is ToolId.Cv -> {
+                        val out = Filters.apply(src, tool.t, intensity)
+                        showResult(out, tool.label, t0)
+                    }
+                    ToolId.Portrait -> {
+                        val out = SegTools.portrait(this, src, intensity)
+                        showResult(out, tool.label, t0)
+                    }
+                    ToolId.Jawline -> {
+                        val out = SegTools.jawline(this, src, intensity)
+                        showResult(out, tool.label, t0)
+                    }
+                    ToolId.Upscale2, ToolId.Upscale4 -> {
+                        if (esrgan == null) esrgan = Esrgan(this)
+                        if (esrgan?.available != true) {
+                            runOnUiThread { processing = false; statusText.text = "Upscale model failed to load" }
+                            return@Thread
+                        }
+                        // cap input: max 24 tiles (6x4)
+                        val factor2 = tool is ToolId.Upscale2
+                        var work = src
+                        var scaled: Mat? = null
+                        val maxSide = 512
+                        if (maxOf(src.cols(), src.rows()) > maxSide) {
+                            val r = maxSide.toDouble() / maxOf(src.cols(), src.rows())
+                            scaled = Mat()
+                            Imgproc.resize(src, scaled, org.opencv.core.Size(src.cols() * r, src.rows() * r))
+                            work = scaled
+                        }
+                        val out = esrgan!!.upscale(work, factor2) { done, total ->
+                            runOnUiThread { statusText.text = "${tool.label}: tile $done of $total" }
+                        }
+                        scaled?.release()
+                        showResult(out, tool.label, t0, replaceBase = true)
+                    }
+                }
+            } catch (t: Throwable) {
+                runOnUiThread { processing = false; statusText.text = "Failed: ${t.message}" }
             }
         }.start()
+    }
+
+    private fun showResult(out: Mat, label: String, t0: Long, replaceBase: Boolean = false) {
+        val bmp = Filters.matToBitmap(out)
+        out.release()
+        val ms = System.currentTimeMillis() - t0
+        runOnUiThread {
+            processing = false
+            current = bmp
+            imageView.setImageBitmap(bmp)
+            statusText.text = "$label - ${ms / 1000.0}s - hold photo to compare"
+            if (replaceBase) {
+                // upscale: result becomes the new working image
+                srcMat?.release()
+                srcMat = Filters.bitmapToMat(bmp)
+                original = bmp
+            }
+        }
     }
 
     private fun saveToGallery() {
         val bmp = current ?: return
         Thread {
-            try {
-                val name = "EnhancePro_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/EnhancePro")
-                }
-                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-                    toast("Saved to gallery")
-                } else toast("Save failed")
-            } catch (t: Throwable) { toast("Save failed: ${t.message}") }
+            val name = VideoTools.saveBitmap(this, bmp, "edit")
+            toast(if (name != null) "Saved to gallery" else "Save failed")
         }.start()
     }
 
@@ -259,5 +308,6 @@ class EditorActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         srcMat?.release()
+        esrgan?.close()
     }
 }

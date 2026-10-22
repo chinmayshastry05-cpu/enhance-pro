@@ -24,6 +24,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val pickVideo = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            val i = Intent(this, VideoActivity::class.java)
+            i.putExtra(VideoActivity.EXTRA_URI, uri.toString())
+            startActivity(i)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         OpenCVLoader.initLocal()
@@ -46,7 +54,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
         }
         val sub = TextView(this).apply {
-            text = "One tap. Better photos.\nFully on your phone - nothing leaves it."
+            text = "One tap. Better photos and videos.\nFully on your phone - nothing leaves it."
             setTextColor(Color.parseColor("#9A9AA2"))
             textSize = 15f
             gravity = Gravity.CENTER
@@ -68,9 +76,25 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { pickImage.launch("image/*") }
         }
 
+        val btn2 = TextView(this).apply {
+            text = "Pick a video"
+            setTextColor(Color.WHITE)
+            textSize = 17f
+            gravity = Gravity.CENTER
+            val d = GradientDrawable()
+            d.setColor(Color.parseColor("#1C1C22"))
+            d.cornerRadius = 60f
+            background = d
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 140)
+            lp.topMargin = 30
+            layoutParams = lp
+            setOnClickListener { pickVideo.launch("video/*") }
+        }
+
         root.addView(title)
         root.addView(sub)
         root.addView(btn)
+        root.addView(btn2)
         setContentView(root)
     }
 }

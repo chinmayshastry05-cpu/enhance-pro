@@ -8,12 +8,14 @@ import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import org.opencv.photo.Photo
+import org.opencv.calib3d.Calib3d
 
 object Filters {
 
     enum class Tool(val label: String) {
         MAGIC("Magic"), BRIGHTEN("Brighten"), HDR("HDR"),
-        SHARPEN("Sharpen"), DEBLUR("Deblur"), MOIRE("Fix Moire")
+        SHARPEN("Sharpen"), DEBLUR("Deblur"), MOIRE("Fix Moire"),
+        SHADOW("Remove Shadow"), GLARE("Reduce Glare"), LENS("Fix Lens")
     }
 
     fun bitmapToMat(b: Bitmap): Mat {
@@ -43,6 +45,9 @@ object Filters {
             Tool.SHARPEN -> sharpen(src, 1.0)
             Tool.DEBLUR -> deblur(src)
             Tool.MOIRE -> moire(src)
+            Tool.SHADOW -> shadow(src, intensity)
+            Tool.GLARE -> glare(src)
+            Tool.LENS -> lens(src, intensity)
         }
         val alpha = intensity.coerceIn(0, 100) / 100.0
         val out = Mat()
@@ -191,6 +196,93 @@ object Filters {
         val out = Mat()
         Core.addWeighted(src, 1.0 + amount, blur, -amount, 0.0, out)
         blur.release()
+        return out
+    }
+
+    private fun shadow(src: Mat, intensity: Int): Mat {
+        // lift dark regions toward local background brightness
+        val lab = Mat()
+        Imgproc.cvtColor(src, lab, Imgproc.COLOR_RGB2Lab)
+        val ch = ArrayList<Mat>()
+        Core.split(lab, ch)
+        lab.release()
+        val l = ch[0]
+        val bg = Mat()
+        Imgproc.GaussianBlur(l, bg, Size(0.0, 0.0), 40.0)
+        // shadow mask: pixels notably darker than local background
+        val lF = Mat(); val bgF = Mat()
+        l.convertTo(lF, CvType.CV_32F); bg.convertTo(bgF, CvType.CV_32F)
+        val ratio = Mat()
+        Core.divide(lF, bgF, ratio)
+        // lift factor = bg/l, capped, applied smoothly where ratio < 0.9
+        val lift = Mat()
+        Core.divide(bgF, lF, lift)
+        Core.min(lift, org.opencv.core.Scalar(2.2), lift)
+        val strength = intensity.coerceIn(0, 100) / 100.0
+        val one = Mat.ones(lift.size(), CvType.CV_32F)
+        val liftBlend = Mat()
+        Core.addWeighted(one, 1.0 - strength, lift, strength, 0.0, liftBlend)
+        val lNew = Mat()
+        Core.multiply(lF, liftBlend, lNew)
+        Core.min(lNew, org.opencv.core.Scalar(255.0), lNew)
+        val l8 = Mat()
+        lNew.convertTo(l8, CvType.CV_8U)
+        ch[0].release(); bg.release(); lF.release(); bgF.release(); ratio.release()
+        lift.release(); one.release(); liftBlend.release(); lNew.release()
+        ch[0] = l8
+        val merged = Mat()
+        Core.merge(ch, merged)
+        ch.forEach { it.release() }
+        val out = Mat()
+        Imgproc.cvtColor(merged, out, Imgproc.COLOR_Lab2RGB)
+        merged.release()
+        return out
+    }
+
+    private fun glare(src: Mat): Mat {
+        // compress clipped highlights: soft-knee curve on V channel
+        val hsv = Mat()
+        Imgproc.cvtColor(src, hsv, Imgproc.COLOR_RGB2HSV)
+        val ch = ArrayList<Mat>()
+        Core.split(hsv, ch)
+        hsv.release()
+        val v = ch[0]
+        val lut = Mat(1, 256, CvType.CV_8UC1)
+        for (i in 0..255) {
+            val x = i / 255.0
+            val y = if (x > 0.75) 0.75 + (x - 0.75) * 0.55 else x
+            lut.put(0, i, (y * 255.0).coerceIn(0.0, 255.0))
+        }
+        val v2 = Mat()
+        Core.LUT(v, lut, v2)
+        lut.release(); v.release()
+        ch[0] = v2
+        val merged = Mat()
+        Core.merge(ch, merged)
+        ch.forEach { it.release() }
+        val out = Mat()
+        Imgproc.cvtColor(merged, out, Imgproc.COLOR_HSV2RGB)
+        merged.release()
+        // recover a bit of local contrast
+        val final = unsharp(out, 4.0, 0.25)
+        out.release()
+        return final
+    }
+
+    private fun lens(src: Mat, intensity: Int): Mat {
+        // slider 0..100 maps to k1 -0.35..+0.35 (50 = no correction)
+        val k1 = (intensity - 50) / 50.0 * 0.35
+        if (kotlin.math.abs(k1) < 0.01) return src.clone()
+        val w = src.cols(); val h = src.rows()
+        val cam = Mat.eye(3, 3, CvType.CV_64F)
+        val f = maxOf(w, h).toDouble()
+        cam.put(0, 0, f); cam.put(1, 1, f)
+        cam.put(0, 2, w / 2.0); cam.put(1, 2, h / 2.0)
+        val dist = Mat.zeros(1, 5, CvType.CV_64F)
+        dist.put(0, 0, k1)
+        val out = Mat()
+        Calib3d.undistort(src, out, cam, dist)
+        cam.release(); dist.release()
         return out
     }
 }
